@@ -17,25 +17,6 @@ __attribute__ ((vector_size (4 * sizeof(double))));
 
 void correlate(int ny, int nx, const float *data, float *result) {
 
-        for (int i = 0; i < ny; i++) {
-            for (int j = 0; j <= i; j++) {
-
-
-
-            
-                double final_sum = 0;
-                for (int n = 0; n < 4; n++) {
-                    final_sum = final_sum + sum[n];
-                }
-                result[i + ny * j] = final_sum;
-            }
-        }
-
-
-}
-
-void correlate(int ny, int nx, const float *data, float *result) {
-
     int vector_c_for_row = ceil(double(nx)/double(4));
     std::vector<double4_t> vectorized_m = std::vector<double4_t> (ny * vector_c_for_row, double4_t {0, 0, 0, 0});
     for (int j = 0; j < ny; j++) {

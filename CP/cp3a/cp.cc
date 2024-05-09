@@ -1,6 +1,8 @@
 #include <math.h>
 #include <vector>
 
+#include <stdlib.h>
+
 #include <iostream>
 
 /*
@@ -16,73 +18,104 @@ __attribute__ ((vector_size (4 * sizeof(double))));
 
 void correlate(int ny, int nx, const float *data, float *result) {
 
-        int partition_count = 4;
-        int partition_step = ceil(double(ny)/double(partition_count));
-
-        for (int n = 0; n < ny && n < partition_count; n++) {
-            int partition_limit = (n + 1) * partition_step;
-            if (partition_limit >= ny) partition_limit = ny;
-            for (int j = n * partition_step; j < partition_limit; j++) {
-
-                int l = 0;
-                for (int i = 0; i < nx; i++) {
-
-                    l++;
-                    if (l >= 4) l = 0;
-                }
-
-
-            }
-        };
-
-
-}
-
-/*
-    int core_count = 4;
-    int thread_partition = floor(double(ny)/double(core_count));
-    if (core_count > ny) thread_partition=1;
-
-    for (int n = 0; n < ny && n < core_count; n++) {
-        for (int i = n * thread_partition; i < ny && i < (n + 1) * thread_partition; i++) {
-            for (int j = (n + 1) * thread_partition; j >= i; j--) {
-                double4_t sum = {0, 0, 0, 0};
-                for (int k = 0; k < vector_c_for_row; k++) {
-                    double4_t prod = vectorized_m[k + j * vector_c_for_row] * vectorized_m[k + i * vector_c_for_row];
-                    sum = sum + prod;
-                }
-                double final_sum = 0;
-                for (int n = 0; n < 4; n++) {
-                    final_sum = final_sum + sum[n];
-                }
-                result[i + ny * j] = final_sum;
-            }
-        }
-
-    }
-*/
-
-/*
-void correlate(int ny, int nx, const float *data, float *result) {
-
-    int vector_c_for_row = ceil(double(nx)/double(4));
-    std::vector<double4_t> vectorized_m = std::vector<double4_t> (ny * vector_c_for_row, double4_t {0, 0, 0, 0});
-    #pragma omp parallel for
+    int row_v_partition_count = ceil(double(nx)/double(4));
+    std::vector<double4_t> vectorized_m = std::vector<double4_t> {};
     for (int j = 0; j < ny; j++) {
-        int l = 0;
+
         int n = 0;
-        double row_mean = 0;
+        int l = 0;
+        double4_t tmp_sum_v = double4_t {0,0,0,0};
+        double4_t sum_v = double4_t {0,0,0,0};
+        double4_t tmp_sqr_sum_v = double4_t {0,0,0,0};
+        double4_t sqr_sum_v = double4_t {0,0,0,0};
+        std::vector<double4_t> vectorized_row = std::vector<double4_t> (row_v_partition_count, double4_t {0, 0, 0, 0});
         for (int i = 0; i < nx; i++) {
             double new_dat_p = data[i + nx * j];
-            vectorized_m[n + j * vector_c_for_row][l] = new_dat_p;
-            row_mean = row_mean + new_dat_p;
+            vectorized_row[n][l] = new_dat_p;
+            tmp_sum_v[l] = new_dat_p;
+            tmp_sqr_sum_v[l] = new_dat_p * new_dat_p;
             l++;
             if (l>=4) {
+                sum_v = sum_v + tmp_sum_v;
+                sqr_sum_v = sqr_sum_v + tmp_sqr_sum_v;
+                tmp_sum_v = double4_t{0,0,0,0};         // Tämä tosin tarvitsee tehdä vain viimeisessä, joten tässä on vielä parannettavaa
+                tmp_sqr_sum_v = double4_t{0,0,0,0};     // Tämä tosin tarvitsee tehdä vain viimeisessä, joten tässä on vielä parannettavaa
                 l = 0;
                 n++;
             }
         }
+        if(l != 0) {
+            sum_v = sum_v + tmp_sum_v;
+            sqr_sum_v = sqr_sum_v + tmp_sqr_sum_v;
+        }
 
+        double sum = sum_v[0] + sum_v[1] + sum_v[2] + sum_v[3];
+        double sqr_sum = sqr_sum_v[0] + sqr_sum_v[1] + sqr_sum_v[2] + sqr_sum_v[3];
+        double mean = sum/nx;
+        double norm_sqr_sum = sqr_sum -(2*mean*sum) + (nx*mean*mean);
+        double norm_sqrt_sum = sqrt(norm_sqr_sum);
+
+        double4_t norm_sqrt_sum_v = {norm_sqrt_sum, norm_sqrt_sum, norm_sqrt_sum, norm_sqrt_sum};
+        double4_t mean_v = {mean, mean, mean, mean};
+        double4_t padded_mean_v = {mean, mean, mean, mean};
+        if(l == 0) l = 4;
+        for (; l < 4; l++) {
+            padded_mean_v[l] = 0;
+        }
+        int s = 0;
+        for(; s < row_v_partition_count - 1; s++) {
+            vectorized_row[s] = (vectorized_row[s]-mean_v)/norm_sqrt_sum_v;
+        }
+        vectorized_row[s] = (vectorized_row[s]-padded_mean_v)/norm_sqrt_sum_v;
+
+        vectorized_m.insert(vectorized_m.end(), vectorized_row.begin(), vectorized_row.end());
+    }
+
+    for (int i = 0; i < ny; i++) {
+        for (int j = 0; j <= i; j++) {
+            double4_t sum = {0, 0, 0, 0};
+            for (int k = 0; k < row_v_partition_count; k++) {
+                double4_t prod = vectorized_m[k + j * row_v_partition_count] * vectorized_m[k + i * row_v_partition_count];
+                sum = sum + prod;
+            }
+            double final_sum = 0;
+            for (int n = 0; n < 4; n++) {
+                final_sum = final_sum + sum[n];
+            }
+            result[i + ny * j] = final_sum;
+        }
+
+    }
+
+}
+
+/*
+void correlate(int ny, int nx, const float *data, float *result) {
+
+    int row_v_partition_count = ceil(double(nx)/double(4));
+    std::vector<double4_t> vectorized_m;
+    for (int j = 0; j < ny; j++) {
+
+        int n = 0;
+        int l = 0;
+        double4_t tmp_sum_v = double4_t {0,0,0,0};
+        double4_t sum_v = double4_t {0,0,0,0};
+        std::vector<double4_t> vectorized_row = std::vector<double4_t> (row_v_partition_count, double4_t {0, 0, 0, 0});
+        for (int i = 0; i < nx; i++) {
+            double new_dat_p = data[i + nx * j];
+            vectorized_row[n][l] = new_dat_p;
+            tmp_sum_v[l] = new_dat_p;
+            l++;
+            if (l>=4) {
+                sum_v = sum_v + tmp_sum_v;
+                tmp_sum_v = double4_t{0,0,0,0};
+                l = 0;
+                n++;
+            }
+        }
+        if(l != 0) sum_v = sum_v + tmp_sum_v;
+
+        double row_mean = sum_v[0] + sum_v[1] + sum_v[2] + sum_v[3];
         row_mean = row_mean/nx;
         double4_t vectorized_row_mean = {row_mean, row_mean, row_mean, row_mean};
         double4_t padded_vectorized_row_mean = {row_mean, row_mean, row_mean, row_mean};
@@ -90,54 +123,39 @@ void correlate(int ny, int nx, const float *data, float *result) {
         for (; l < 4; l++) {
             padded_vectorized_row_mean[l] = 0;
         }
+        double4_t sqr_sum_v = double4_t {0,0,0,0};
         int k = 0;
-        for (; k < vector_c_for_row - 1; k++) {
-            vectorized_m[k + j * vector_c_for_row] = vectorized_m[k + j * vector_c_for_row] - vectorized_row_mean;
+        for (; k < row_v_partition_count - 1; k++) {
+            double4_t tmp_value = vectorized_row[k] - vectorized_row_mean;
+            vectorized_row[k] = tmp_value;
+            sqr_sum_v = sqr_sum_v + tmp_value * tmp_value;
+
         }
-        vectorized_m[k + j * vector_c_for_row] = vectorized_m[k + j * vector_c_for_row] - padded_vectorized_row_mean;
+        double4_t tmp_value = vectorized_row[k] - padded_vectorized_row_mean;
+        vectorized_row[k] = tmp_value;
+        sqr_sum_v = sqr_sum_v + tmp_value * tmp_value;
+        double sqrt_sum = sqr_sum_v[0] + sqr_sum_v[1] + sqr_sum_v[2] + sqr_sum_v[3];
+        sqrt_sum = sqrt(sqrt_sum);
+
+        for(int s = 0; s < row_v_partition_count; s++) {
+            vectorized_row[s] = vectorized_row[s]/sqrt_sum;
+        }
+
+        vectorized_m.insert(vectorized_m.end(), vectorized_row.begin(), vectorized_row.end());
     }
 
-    #pragma omp parallel for
-    for (int j = 0; j < ny; j++) {
-        double4_t vectorized_sqr_sum = {0,0,0,0};
-        for (int k = 0; k < vector_c_for_row; k++) {
-            double4_t sqr = vectorized_m[k + j * vector_c_for_row] * vectorized_m[k + j * vector_c_for_row];
-            vectorized_sqr_sum = vectorized_sqr_sum + sqr;
-        }
-
-        double sqr_sum = 0;
-        for (int t = 0; t < 4; t++) {
-            sqr_sum = sqr_sum + vectorized_sqr_sum[t];
-        }
-
-        double sqrt_sum = sqrt(sqr_sum);
-        for (int k = 0; k < vector_c_for_row; k++) {
-            vectorized_m[k + j * vector_c_for_row] = vectorized_m[k + j * vector_c_for_row]/sqrt_sum;
-        }
-    }
-
-    int core_count = 4;
-    int thread_partition = ceil(double(ny)/double(core_count));
-    if (core_count > ny) thread_partition=1;
-
-    for (int n = 0; n < ny && n < core_count; n++) {
-        for (int i = n * thread_partition; i < ny && i < (n + 1) * thread_partition; i++) {
-
-
-            int j = (n + 1) * thread_partition;
-            if (j >= ny) j = ny - 1;
-            for (; j >= i; j--) {
-                double4_t sum = {0, 0, 0, 0};
-                for (int k = 0; k < vector_c_for_row; k++) {
-                    double4_t prod = vectorized_m[k + j * vector_c_for_row] * vectorized_m[k + i * vector_c_for_row];
-                    sum = sum + prod;
-                }
-                double final_sum = 0;
-                for (int n = 0; n < 4; n++) {
-                    final_sum = final_sum + sum[n];
-                }
-                result[i + ny * j] = final_sum;
+    for (int i = 0; i < ny; i++) {
+        for (int j = 0; j <= i; j++) {
+            double4_t sum = {0, 0, 0, 0};
+            for (int k = 0; k < row_v_partition_count; k++) {
+                double4_t prod = vectorized_m[k + j * row_v_partition_count] * vectorized_m[k + i * row_v_partition_count];
+                sum = sum + prod;
             }
+            double final_sum = 0;
+            for (int n = 0; n < 4; n++) {
+                final_sum = final_sum + sum[n];
+            }
+            result[i + ny * j] = final_sum;
         }
 
     }
