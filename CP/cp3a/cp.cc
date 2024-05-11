@@ -118,10 +118,10 @@ void correlate(int ny, int nx, const float *data, float *result) {
             double8_t sum_v_01 = {0, 0, 0, 0, 0, 0, 0, 0};
             double8_t sum_v_11 = {0, 0, 0, 0, 0, 0, 0, 0};
             for (int k = 0; k < row_v_partition_count; k++) {
-                double8_t prod_00 = vectorized_m[k + jb * row_v_partition_count] * vectorized_m[k + ib * row_v_partition_count];
-                double8_t prod_10 = vectorized_m[k + jb * row_v_partition_count] * vectorized_m[k + (ib + 1) * row_v_partition_count];
-                double8_t prod_01 = vectorized_m[k + (jb + 1) * row_v_partition_count] * vectorized_m[k + ib * row_v_partition_count];
-                double8_t prod_11 = vectorized_m[k + (jb + 1) * row_v_partition_count] * vectorized_m[k + (ib + 1) * row_v_partition_count];
+                double8_t prod_00 = vectorized_m[k + jb * block_size * row_v_partition_count] * vectorized_m[k + ib * block_size * row_v_partition_count];
+                double8_t prod_10 = vectorized_m[k + jb * block_size * row_v_partition_count] * vectorized_m[k + (ib * block_size + 1) * row_v_partition_count];
+                double8_t prod_01 = vectorized_m[k + (jb * block_size + 1) * row_v_partition_count] * vectorized_m[k + ib * block_size * row_v_partition_count];
+                double8_t prod_11 = vectorized_m[k + (jb * block_size + 1) * row_v_partition_count] * vectorized_m[k + (ib * block_size + 1) * row_v_partition_count];
                 sum_v_00 = sum_v_00 + prod_00;
                 sum_v_10 = sum_v_10 + prod_10;
                 sum_v_01 = sum_v_01 + prod_01;
@@ -139,10 +139,10 @@ void correlate(int ny, int nx, const float *data, float *result) {
                 sum_11 = sum_11 + sum_v_11[k];
             }
 
-            result[ib + ny * jb] = sum_00;
-            result[(ib + 1) + ny * jb] = sum_10;
-            result[ib + ny * (jb + 1)] = sum_01;
-            result[(ib + 1) + ny * (jb + 1)] = sum_11;
+            result[ib * block_size + ny * jb * block_size] = sum_00;
+            if ((block_size * ib + 1) < ny) result[(ib * block_size + 1) + ny * jb * block_size] = sum_10;
+            if ((block_size * jb + 1) < ny) result[ib * block_size + ny * (jb * block_size + 1)] = sum_01;
+            if ((block_size * ib + 1) < ny && (block_size * jb + 1) < ny) result[(ib * block_size + 1) + ny * (jb * block_size + 1)] = sum_11;
         }
 
     }
