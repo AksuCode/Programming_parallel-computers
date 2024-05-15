@@ -2,6 +2,8 @@
 #include <vector>
 #include <cmath>
 
+#include <chrono>
+
 struct Result {
     int y0;
     int x0;
@@ -32,9 +34,11 @@ Result segment(int ny, int nx, const float *data) {
 
     // Sum of all pixel color component values stored in vector (R,G,B).
     std::vector<double> color_sum_v = std::vector<double> (3,0);
+    #pragma omp parallel for schedule(static,1)
     for (int j = 0; j < ny; j++) {
         for (int i = 0; i < nx; i++) {
             int c_indx = 3 * i + 3 * nx * j;
+            #pragma omp critical
             for (int n = 0; n < 3; n++) {
                 color_sum_v[n] = color_sum_v[n] + data[n + c_indx];
             }
@@ -42,7 +46,7 @@ Result segment(int ny, int nx, const float *data) {
     }
 
     double csqr_sum = 0;    // Squared sum for all pixels and colors
-    #pragma omp parallel for
+    #pragma omp parallel for schedule(static,1)
     for (int j = 0; j < ny; j++) {
         for (int i = 0; i < nx; i++) {
             int c_indx = 3 * i + 3 * nx * j;
@@ -52,11 +56,10 @@ Result segment(int ny, int nx, const float *data) {
         }
     }
 
-    struct Result res;
-    double minimum_cost = DBL_MAX;
+    std::vector<std::pair<double, Result>> results;
     
     // Create rectangle segments of varying size.
-    //#pragma omp parallel for schedule(static,1)
+    #pragma omp parallel for schedule(static,1)
     for (int w = 1; w <= nx; w++) {
         for (int h = 1; h <= ny; h++) {
 
@@ -125,20 +128,36 @@ Result segment(int ny, int nx, const float *data) {
                     }
                     double cost = csqr_sum -(inside_sqr_num/inside_denumerator) -(outside_sqr_num/outside_denumerator);
 
-                    // Check if a new minimum cost is found:
-                    if (cost < minimum_cost) {
-                        minimum_cost = cost;
-                        res.x0 = up_left_c_x;
-                        res.x1 = low_right_c_x;
-                        res.y0 = up_left_c_y;
-                        res.y1 = low_right_c_y;
-                        for (int n = 0; n < 3; n++) {
-                            res.inner[n] = tmp_inside_numerator[n]/inside_denumerator;
-                            res.outer[n] = tmp_outside_numerator[n]/outside_denumerator;
-                        }
+                    struct Result res;
+
+                    res.x0 = up_left_c_x;
+                    res.x1 = low_right_c_x;
+                    res.y0 = up_left_c_y;
+                    res.y1 = low_right_c_y;
+                    for (int n = 0; n < 3; n++) {
+                        res.inner[n] = tmp_inside_numerator[n]/inside_denumerator;
+                        res.outer[n] = tmp_outside_numerator[n]/outside_denumerator;
                     }
+
+                    std::pair<double,Result> new_pair = std::pair<double,Result> (cost, res);
+                    #pragma omp critical
+                    {
+                        results.push_back(new_pair);
+                    }
+
                 }
             }
+        }
+    }
+
+    struct Result res;
+    double minimum_cost = DBL_MAX;
+
+    for(auto it = results.begin(); it!=results.end(); it++) {
+        std::pair<double,Result> tmp = *it;
+        if (tmp.first < minimum_cost) {
+            minimum_cost = tmp.first;
+            res = tmp.second;
         }
     }
 
