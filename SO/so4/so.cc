@@ -1,5 +1,7 @@
 #include <algorithm>
 #include <vector>
+#include <iostream>
+#include <cmath>
 
 #include <omp.h>
 
@@ -7,7 +9,6 @@
 
 typedef unsigned long long data_t;
 
-/*
 void mSort(int start, int mid, int end, data_t * data) {
     int arr_size = end - start;
     std::vector<data_t> aux(arr_size);
@@ -38,13 +39,8 @@ void mSort(int start, int mid, int end, data_t * data) {
         }
     }
 
-    data_t * ptr = data + start;
-    for (auto it = aux.begin(); it!=aux.end(); it++) {
-        *ptr = *it;
-        ptr++;
-    }
+    std::copy(aux.begin(), aux.end(), data + start);
 }
-
 
 void mergeSort(int start, int end, data_t * data, int depth) {
 
@@ -56,27 +52,63 @@ void mergeSort(int start, int end, data_t * data, int depth) {
     int mid = start + (end - start)/2;
     if (mid <= start) return;
     
+    
+    #pragma omp task
     mergeSort(start, mid, data, depth - 1);
+
+    #pragma omp task
     mergeSort(mid, end, data, depth - 1);
 
+    #pragma omp taskwait
     mSort(start, mid, end, data);
 
 }
 
 void psort(int n, data_t *data) {
 
-    int recursion_depth = 4;
+    int recursion_depth = 5;
+    #pragma omp parallel
+    #pragma omp single
     mergeSort(0, n, data, recursion_depth);
 
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/*
+void mSort(int start, int mid, int end, data_t * data) {
+    int right = mid;
+    for (int k = start; k < mid; k++) {
+        if (data[right] < data[k]) {
+            data_t tmp = data[k];
+            data[k] = data[right];
+            data[right] = tmp;
+
+            for (int i = right; i < end - 1; i++) {
+                if (tmp > data[i + 1]) {
+                    data[i] = data[i + 1];
+                    data[i + 1] = tmp;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+}
 */
-
-
-
-
-
-
-
 
 
 
@@ -219,21 +251,12 @@ void psort(int n, data_t *data) {
 }
 */
 
+/*
 void mSort(int start, int mid, int end, data_t * data) {
     int arr_size = end - start;
     std::vector<data_t> aux(arr_size);
     int right = mid;
     int left = start;
-
-    for (int k = start; k < mid; k++) {
-        std::cout << data[k] << std::endl;
-    }
-    std::cout << std::endl;
-
-    for (int k = mid; k < end; k++) {
-        std::cout << data[k] << std::endl;
-    }
-    std::cout << std::endl;
 
     for (int k = 0; k < arr_size; k++) {
 
@@ -268,29 +291,79 @@ void mSort(int start, int mid, int end, data_t * data) {
 
 void psort(int n, data_t *data) {
 
-    const int depth = 1;
-    for (int k = depth; k <= n; k=k*2) {
-        int i = 0;
-        for (; i < (n/k) - 1; i++) {
-            int start = k*i;
-            int end = k*(i+1);
+    if (n <= 1) return;
 
-            if (k == depth) {
-                std::sort(data + start, data +  start + (end - start)/2);
-                std::sort(data + start + (end - start)/2, data + end);
-            }
-            else mSort(start, start + (end - start)/2, end, data);
-        }
-        int start = k*i;
-        int end = n;
+    int divisor = 8;           // power of two
 
-        if (k == depth) {
-            std::sort(data + start, data + start + (end - start)/2);
-            std::sort(data + start + (end - start)/2, data + end);
-        }
-        else mSort(start, start + (end - start)/2, end, data);
+    if (divisor > n) {
+        std::sort(data, data + n);
+        return;
     }
+
+    int interval = ceil(double(n)/double(divisor));
+
+    //#pragma omp parallel for
+    for (int k = 0; k < n; k = k + interval) {
+        if (k + interval >= n) {
+            int start = k;
+            int end = n;
+            std::cout << "Start: " << start << std::endl;
+            std::cout << "End: " << end << std::endl;
+            std::sort(data + start, data + end);
+        } else {
+            int start = k;
+            int end = k + interval;
+            std::cout << "Start: " << start << std::endl;
+            std::cout << "End: " << end << std::endl;
+            std::sort(data + start, data + end);
+        }
+    }
+
+    std::cout << std::endl;
+
+    
+    std::vector<int> boundaries;
+    for (int k = 0; k < n; k = k + interval) {
+        boundaries.push_back(k);
+    }
+    boundaries.push_back(n);
+
+    for (int k = 0; k < size(boundaries); k=k+3) {
+
+    }
+    
+
+    
+    int new_interval = interval * 2;
+    for (; new_interval < n; new_interval = new_interval*2) {
+        for (int k = 0; k < n; k = k + new_interval) {
+            if (k + new_interval >= n) {
+                int start = k;
+                int end = n;
+                int mid = start + (end - start)/2;
+                std::cout << "Start: " << start << std::endl;
+                std::cout << "Mid: " << mid << std::endl;
+                std::cout << "End: " << end << std::endl;
+                mSort(start, mid, end, data);
+            } else {
+                int start = k;
+                int end = k + new_interval;
+                int mid = start + (end - start)/2;
+                std::cout << "Start: " << start << std::endl;
+                std::cout << "Mid: " << mid << std::endl;
+                std::cout << "End: " << end << std::endl;
+                mSort(start, mid, end, data);
+            }
+        }
+        std::cout << std::endl;
+
+    }
+    int old_interval = new_interval/2;
+
+    mSort(0, old_interval, n, data);
+
 }
+*/
 
 
 /* WORKING simple implementation.
