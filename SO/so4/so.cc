@@ -9,26 +9,20 @@
 
 typedef unsigned long long data_t;
 
-void mSort(int start, int mid, int end, data_t * data) {
-    int arr_size = end - start;
-    std::vector<data_t> aux(arr_size);
+void mSort(int start, int mid, int end, data_t * data, data_t * aux) {
     int right = mid;
     int left = start;
-
-    for (int k = 0; k < arr_size; k++) {
+    for (int k = start; k < end; k++) {
 
         if (right == end) {
-            aux[k] = data[left];
-            left++;
-            continue;
-        }
-        
-        if (left == mid) {
-            aux[k] = data[right];
-            right++;
-            continue;
+            std::copy(data + left, data + mid, aux + k);
+            break;
         }
 
+        if (left == mid) {
+            std::copy(data + right, data + end, aux + k);
+            break;
+        }
 
         if (data[right] < data[left]) {
             aux[k] = data[right];
@@ -37,12 +31,13 @@ void mSort(int start, int mid, int end, data_t * data) {
             aux[k] = data[left];
             left++;
         }
+
     }
 
-    std::copy(aux.begin(), aux.end(), data + start);
+    std::copy(aux + start, aux + end, data + start);
 }
 
-void mergeSort(int start, int end, data_t * data, int depth) {
+void mergeSort(int start, int end, data_t * data, data_t * aux, int depth) {
 
     if (depth <= 0) {
         std::sort(data + start, data + end);
@@ -54,25 +49,25 @@ void mergeSort(int start, int end, data_t * data, int depth) {
     
     
     #pragma omp task
-    mergeSort(start, mid, data, depth - 1);
+    mergeSort(start, mid, data, aux, depth - 1);
 
     #pragma omp task
-    mergeSort(mid, end, data, depth - 1);
+    mergeSort(mid, end, data, aux, depth - 1);
 
     #pragma omp taskwait
-    mSort(start, mid, end, data);
+    mSort(start, mid, end, data, aux);
 
 }
 
 void psort(int n, data_t *data) {
 
     int recursion_depth = 5;
+    std::vector<data_t> aux(n);
     #pragma omp parallel
     #pragma omp single
-    mergeSort(0, n, data, recursion_depth);
+    mergeSort(0, n, data, &(aux[0]), recursion_depth);
 
 }
-
 
 
 
