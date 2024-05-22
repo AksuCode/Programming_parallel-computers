@@ -12,44 +12,40 @@ typedef unsigned long long data_t;
 
 int qSort(int start, int end, data_t * data) {
 
-    data_t pivot = data[start + (end-start)/2];
-
+    data_t pivot = data[end - 1];
     /*
-    // Median value of first, mid and last
-    int pivot_indx = start;
-    data_t pivot = data[start];
-
-    if (data[start + (end-start)/2] > pivot) {
-        if (data[end - 1] > data[start + (end-start)/2]) {
-            pivot = data[start + (end-start)/2];
-            //ivot_indx = start + (end-start)/2;
-        } else {
-            if (pivot < data[end - 1]) {
-                pivot = data[end - 1];
-                //pivot_indx = end - 1;
-            }
-        }
-    } else {
-        if (pivot > data[end - 1]) {
-            pivot = data[end - 1];
-            //pivot_indx = end - 1;
-        }
+    if (end - start > 10) {
+        int pivot_indx = start + (end-start)/2;
+        std::nth_element(data + pivot_indx - 4, data + pivot_indx, data + pivot_indx + 5);
+        pivot = data[pivot_indx];
+        data[pivot_indx] = data[end - 1];
+        data[end - 1] = pivot;
     }
     */
 
-    int l = start;
-    for (; l < end; l++) {
-        if (data[l] > pivot) break;
+    int l = start - 1;
+    int r = (end - 1) + 1;
+    while (true) {
+
+        do {
+            l++;
+        } while (data[l] < pivot);
+
+        do {
+            r--;
+        } while (data[r] >= pivot && r > l);
+
+        if (l >= r) break;
+
+        data_t tmp = data[l];
+        data[l] = data[r];
+        data[r] = tmp;
+
     }
 
-    for (int r = l + 1; r < end; r++) {
-        if (data[r] <= pivot) {
-            data_t tmp = data[r];
-            data[r] = data[l];
-            data[l] = tmp;
-            l++;
-        }
-    }
+    data_t tmp = data[end - 1];
+    data[end - 1] = data[l];
+    data[l] = tmp;
 
     return l;
 }
@@ -70,7 +66,7 @@ void quickSort(int start, int end, data_t * data, int depth) {
     quickSort(start, new_div_point, data, depth - 1);
 
     #pragma omp task
-    quickSort(new_div_point, end, data, depth - 1);
+    quickSort(new_div_point + 1, end, data, depth - 1);
 
 }
 
@@ -80,12 +76,75 @@ void psort(int n, data_t *data) {
 
     if (n < 2) return;
 
-    int recursion_depth = 5;
+    int recursion_depth = 8;
     #pragma omp parallel
     #pragma omp single
     quickSort(0, n, data, recursion_depth);
 
 }
+
+/*
+int qSort(int start, int end, data_t * data) {
+
+    data_t pivot = data[end - 1];
+    if (end - start > 10) {
+        int pivot_indx = start + (end-start)/2;
+        std::nth_element(data + pivot_indx - 4, data + pivot_indx, data + pivot_indx + 5);
+        pivot = data[pivot_indx];
+        data[pivot_indx] = data[end - 1];
+        data[end - 1] = pivot;
+    }
+
+    int l = start;
+    for (int k = start; k < end - 1; k++) {
+        if (data[k] <= pivot) {
+            data_t tmp = data[k];
+            data[k] = data[l];
+            data[l] = tmp;
+            l++;
+        }
+    }
+
+    data_t tmp = data[l];
+    data[l] = data[end - 1];
+    data[end - 1] = tmp;
+
+    return l;
+}
+
+
+void quickSort(int start, int end, data_t * data, int depth) {
+
+    if (depth < 0) {
+        std::sort(data + start, data + end);
+        return;
+    }
+
+    if (start >= end) return;
+
+    int new_div_point = qSort(start, end, data);
+    
+    #pragma omp task
+    quickSort(start, new_div_point, data, depth - 1);
+
+    #pragma omp task
+    quickSort(new_div_point + 1, end, data, depth - 1);
+
+}
+
+
+
+void psort(int n, data_t *data) {
+
+    if (n < 2) return;
+
+    int recursion_depth = 8;
+    #pragma omp parallel
+    #pragma omp single
+    quickSort(0, n, data, recursion_depth);
+
+}
+*/
 
 
 /*
