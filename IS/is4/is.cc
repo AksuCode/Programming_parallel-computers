@@ -8,12 +8,12 @@
 #include <iostream>
 
 struct Result {
-    int y0;
-    int x0;
-    int y1;
-    int x1;
-    float outer[3];
-    float inner[3];
+    int y0 = 0;
+    int x0 = 0;
+    int y1 = 0;
+    int x1 = 0;
+    float outer[3] = {0};
+    float inner[3] = {0};
 };
 
 typedef double double4_t
@@ -23,7 +23,8 @@ __attribute__ ((vector_size (4 * sizeof(double))));
 Result segment(int ny, int nx, const float *data) {
 
     // Lets turn data into an array of pixels. Using double4_t for AVX-2.
-    std::vector<double4_t> data_px(nx * ny);
+    std::vector<double4_t> data_pxv(nx * ny);
+    double4_t * data_px = &data_pxv[0];
     #pragma omp parallel for schedule(static,1)
     for (int j = 0; j < ny; j++) {
         for (int i = 0; i < nx; i++) {
@@ -54,11 +55,200 @@ Result segment(int ny, int nx, const float *data) {
         }
     }
 
+    // Initialize inside regions
+    std::vector<double4_t> initial_inside_numerator_v((nx + 1) * (ny + 1), double4_t {0,0,0,0});
+    double4_t * initial_inside_numerator = &initial_inside_numerator_v[0];
+    #pragma omp parallel for collapse(2)
+    for (int w = 1; w <= nx; w++) {
+        for (int h = 1; h <= ny; h++) {
+            for (int j = 0; j < h; j++) {
+                for (int i = 0; i < w; i++) {
+                    initial_inside_numerator[w + nx * h] = initial_inside_numerator[w + nx * h] + data_px[i + nx *j];
+                }
+            }
+        }
+    }
+
+    // Save results
+    std::pair<double, Result> dummy;
+    dummy.first = DBL_MAX;
+    std::vector<std::pair<double, Result>> results(nx + 1, dummy);
+
+    // Take time
+    double t1 = 0;
+    double t2 = 0;
+    double t3 = 0;
+
+    // Create rectangle segments of varying size.
+    //#pragma omp parallel for schedule(static,1)
+    for (int w = 1; w <= nx; w++) {
+
+        // Initialize stuff for the threads:
+        // Minimum cost:
+        double minimum_cost = DBL_MAX;
+        struct Result res;
+
+        for (int h = 1; h <= ny; h++) {
+
+            // Denumerators
+            double4_t inside_denumerator = {1.0/double(h * w), 1.0/double(h * w), 1.0/double(h * w), 1.0/double(h * w)};
+            double4_t outside_denumerator = double4_t {1.0/(double(nx * ny)-double(h * w)), 1.0/(double(nx * ny)-double(h * w)), 1.0/(double(nx * ny)-double(h * w)), 1.0/(double(nx * ny)-double(h * w))};
+
+            // Inside region
+            double4_t inside_numerator = initial_inside_numerator[w + nx * h];
+            // Outside region
+            double4_t outside_numerator = color_sum_v - inside_numerator;
+
+            // The rectangle is moved. Inside and outside region numerators and sqr sums are recalculated
+            for (int up_left_c_y = 0; h + up_left_c_y <= ny; up_left_c_y++) {
+
+                int low_right_c_y = h + up_left_c_y;   // Lower right corner y pos
+
+                auto t11 = std::chrono::high_resolution_clock::now();
+                if (up_left_c_y != 0) {
+                    // Go through values that are left outside the new region our that are added to the new region after movement in y direction:
+                    for (int i = 0; i < w; i++) {
+                        int c_indx = i + nx * (up_left_c_y - 1);
+                        int h_diff = nx * h;
+                        outside_numerator = outside_numerator + data_px[c_indx] - data_px[c_indx + h_diff];
+                        inside_numerator = inside_numerator - data_px[c_indx] + data_px[c_indx + h_diff];
+                    }
+                }
+                auto t12 = std::chrono::high_resolution_clock::now();
+                std::chrono::duration<double, std::milli> inst1 = t12-t11;
+                t1 = t1 + inst1.count();
+
+                auto t21 = std::chrono::high_resolution_clock::now();
+                // Save values for movement in x direction
+                std::vector<double4_t> alloc_tmp_outside_numerator_v(nx-w + 1, double4_t {0,0,0,0});
+                double4_t * tmp_outside_numerator_v = &alloc_tmp_outside_numerator_v[0];
+                std::vector<double4_t> alloc_tmp_inside_numerator_v(nx-w + 1, double4_t {0,0,0,0});
+                double4_t * tmp_inside_numerator_v = &alloc_tmp_inside_numerator_v[0];
+                for (int j = up_left_c_y; j < low_right_c_y; j++) {
+                    for (int up_left_c_x = 1; w + up_left_c_x <= nx; up_left_c_x++) {
+                        int c_indx = (up_left_c_x - 1) + nx * j;
+                        tmp_inside_numerator_v[up_left_c_x] = tmp_inside_numerator_v[up_left_c_x] - data_px[c_indx] + data_px[c_indx + w];
+                        tmp_outside_numerator_v[up_left_c_x] = tmp_outside_numerator_v[up_left_c_x] + data_px[c_indx] - data_px[c_indx + w]; 
+                    }
+                }
+                auto t22 = std::chrono::high_resolution_clock::now();
+                std::chrono::duration<double, std::milli> inst2 = t22-t21;
+                t2 = t2 + inst2.count();
+
+                auto t31 = std::chrono::high_resolution_clock::now();
+                double4_t cumulative_in = inside_numerator;
+                double4_t cumulative_out = outside_numerator;
+                for (int up_left_c_x = 0; w + up_left_c_x <= nx; up_left_c_x++) {
+                    cumulative_in = cumulative_in + tmp_inside_numerator_v[up_left_c_x];
+                    cumulative_out = cumulative_out + tmp_outside_numerator_v[up_left_c_x];
+
+                    // Calculating cost:
+                    double4_t inside_sqr_num = cumulative_in * cumulative_in;
+                    double4_t outside_sqr_num = cumulative_out * cumulative_out;
+                    double4_t cost = csqr_sum -(inside_sqr_num*inside_denumerator) -(outside_sqr_num*outside_denumerator);
+
+                    double final_cost = cost[0] + cost[1] + cost[2];
+
+                    if (final_cost < minimum_cost) {
+
+                        res.x0 = up_left_c_x;
+                        res.x1 = up_left_c_x + w;
+                        res.y0 = up_left_c_y;
+                        res.y1 = low_right_c_y;
+                        double4_t in = cumulative_in*inside_denumerator;
+                        double4_t out = cumulative_out*outside_denumerator;
+                        res.inner[0] = in[0];
+                        res.inner[1] = in[1];
+                        res.inner[2] = in[2];
+                        res.outer[0] = out[0];
+                        res.outer[1] = out[1];
+                        res.outer[2] = out[2];
+
+                        minimum_cost = final_cost;
+
+                    }
+                }
+                auto t32 = std::chrono::high_resolution_clock::now();
+                std::chrono::duration<double, std::milli> inst3 = t32-t31;
+                t3 = t3 + inst3.count();
+            }
+        }
+
+        results[w] = std::pair(minimum_cost, res);
+    }
+
+    std::cout << "First: " << t1 << std::endl;
+    std::cout << "Second: " << t2 << std::endl;
+    std::cout << "Third: " << t3 << std::endl;
+
+    int res_indx = 0;
+    double minimum_cost = DBL_MAX;
+
+    for(int k = 0; k < nx + 1; k++) {
+        std::pair<double,Result> tmp = results[k];
+        if (tmp.first < minimum_cost) {
+            minimum_cost = tmp.first;
+            res_indx = k;
+        }
+    }
+
+    return results[res_indx].second;
+}
+
+/*
+typedef double double8_t
+__attribute__ ((vector_size (8 * sizeof(double))));
+
+// Rinnasteisuus ja tehokkaampi suorakulmion koon muuttaminen. Double 4t
+Result segment(int ny, int nx, const float *data) {
+
+    // ILP
+    constexpr int nb = 4;
+    int v_row_num = (nx + 8 - 1)/8;
+    int na = (v_row_num + nb - 1) / nb;
+    int nab = na*nb;
+
+    // Vectorization
+    std::vector<double8_t> data_R_v(nab * ny);
+    std::vector<double8_t> data_G_v(nab * ny);
+    std::vector<double8_t> data_B_v(nab * ny);
+    double8_t * data_R = &data_R_v[0];
+    double8_t * data_G = &data_G_v[0];
+    double8_t * data_B = &data_B_v[0];
+    #pragma omp parallel for schedule(static,1)
+    for (int j = 0; j < ny; j++) {
+        for (int i = 0; i < nx; i++) {
+            int c_indx = 3 * i + 3 * nx * j;
+            #pragma omp critical
+            for (int n = 0; n < 8; n++) {
+                data_px[i + nab * j][n] = double(data[n + c_indx]);
+            }
+        }
+    }
+
+    // Sum of all pixel color component values stored in vector (R,G,B).
+    double4_t color_sum_v = {0,0,0,0};
+    #pragma omp parallel for schedule(static,1)
+    for (int j = 0; j < ny; j++) {
+        for (int i = 0; i < nx; i++) {
+            #pragma omp critical
+            color_sum_v = color_sum_v + data_px[i + nx * j];
+        }
+    }
+
+    //double csqr_sum = 0;    // Squared sum for all pixels and colors
+    double4_t csqr_sum = {0,0,0,0};
+    #pragma omp parallel for schedule(static,1)
+    for (int j = 0; j < ny; j++) {
+        for (int i = 0; i < nx; i++) {
+            csqr_sum = csqr_sum + data_px[i + nx * j] * data_px[i + nx * j];
+        }
+    }
+
 
     std::pair<double, Result> dummy;
     dummy.first = DBL_MAX;
     std::vector<std::pair<double, Result>> results(nx + 1, dummy);
-    
 
     // Create rectangle segments of varying size.
     #pragma omp parallel for schedule(static,1)
@@ -70,7 +260,12 @@ Result segment(int ny, int nx, const float *data) {
             initial_inside_numerator = initial_inside_numerator + data_px[i];
         }
 
-        std::vector<std::pair<double, Result>> tmp_results(ny + 1, dummy);
+
+        // Initialize stuff for the threads:
+        // Minimum cost:
+        double minimum_cost = DBL_MAX;
+        struct Result res;
+
         for (int h = 1; h <= ny; h++) {
 
             if (h != 1) {
@@ -79,13 +274,16 @@ Result segment(int ny, int nx, const float *data) {
                 }
             }
 
-            double4_t inside_numerator = initial_inside_numerator;
+            // Denumerators
+            double4_t inside_denumerator = {1.0/double(h * w), 1.0/double(h * w), 1.0/double(h * w), 1.0/double(h * w)};
+            double4_t outside_denumerator = double4_t {1.0/(double(nx * ny)-double(h * w)), 1.0/(double(nx * ny)-double(h * w)), 1.0/(double(nx * ny)-double(h * w)), 1.0/(double(nx * ny)-double(h * w))};
 
+            // Numerators
+            // Inside region
+            double4_t inside_numerator = initial_inside_numerator;
             // Outside region
             double4_t outside_numerator = color_sum_v - inside_numerator;
 
-            int tmp_results_2_it = 0;
-            std::vector<std::pair<double, Result>> tmp_results_2((1 + nx) * (1 + ny), dummy);
             // The rectangle is moved. Inside and outside region numerators and sqr sums are recalculated
             for (int up_left_c_y = 0; h + up_left_c_y <= ny; up_left_c_y++) {
 
@@ -102,8 +300,10 @@ Result segment(int ny, int nx, const float *data) {
                 }
 
                 // Save values for movement in x direction
-                std::vector<double4_t> tmp_outside_numerator_v(nx-w + 1, double4_t {0,0,0,0});
-                std::vector<double4_t> tmp_inside_numerator_v(nx-w + 1, double4_t {0,0,0,0});
+                std::vector<double4_t> alloc_tmp_outside_numerator_v(nx-w + 1, double4_t {0,0,0,0});
+                double4_t * tmp_outside_numerator_v = &alloc_tmp_outside_numerator_v[0];
+                std::vector<double4_t> alloc_tmp_inside_numerator_v(nx-w + 1, double4_t {0,0,0,0});
+                double4_t * tmp_inside_numerator_v = &alloc_tmp_inside_numerator_v[0];
                 for (int j = up_left_c_y; j < low_right_c_y; j++) {
                     for (int up_left_c_x = 1; w + up_left_c_x <= nx; up_left_c_x++) {
                         int c_indx = (up_left_c_x - 1) + nx * j;
@@ -119,86 +319,220 @@ Result segment(int ny, int nx, const float *data) {
                     cumulative_out = cumulative_out + tmp_outside_numerator_v[up_left_c_x];
 
                     // Calculating cost:
-                    double4_t inside_sqr_num = {0,0,0,0};
-                    double4_t outside_sqr_num = {0,0,0,0};
-                    double4_t inside_denumerator = {double(h * w), double(h * w), double(h * w), double(h * w)};
-                    double4_t outside_denumerator = double4_t {double(nx * ny), double(nx * ny), double(nx * ny), double(nx * ny)} - inside_denumerator;
-                    inside_sqr_num = inside_sqr_num + cumulative_in * cumulative_in;
-                    outside_sqr_num = outside_sqr_num + cumulative_out * cumulative_out;
-                    double4_t cost = csqr_sum -(inside_sqr_num/inside_denumerator) -(outside_sqr_num/outside_denumerator);
+                    double4_t inside_sqr_num = cumulative_in * cumulative_in;
+                    double4_t outside_sqr_num = cumulative_out * cumulative_out;
+                    double4_t cost = csqr_sum -(inside_sqr_num*inside_denumerator) -(outside_sqr_num*outside_denumerator);
 
                     double final_cost = cost[0] + cost[1] + cost[2];
 
-                    struct Result res;
+                    if (final_cost < minimum_cost) {
 
-                    res.x0 = up_left_c_x;
-                    res.x1 = up_left_c_x + w;
-                    res.y0 = up_left_c_y;
-                    res.y1 = low_right_c_y;
-                    double4_t in = cumulative_in/inside_denumerator;
-                    double4_t out = cumulative_out/outside_denumerator;
-                    res.inner[0] = in[0];
-                    res.inner[1] = in[1];
-                    res.inner[2] = in[2];
-                    res.outer[0] = out[0];
-                    res.outer[1] = out[1];
-                    res.outer[2] = out[2];
+                        res.x0 = up_left_c_x;
+                        res.x1 = up_left_c_x + w;
+                        res.y0 = up_left_c_y;
+                        res.y1 = low_right_c_y;
+                        double4_t in = cumulative_in*inside_denumerator;
+                        double4_t out = cumulative_out*outside_denumerator;
+                        res.inner[0] = in[0];
+                        res.inner[1] = in[1];
+                        res.inner[2] = in[2];
+                        res.outer[0] = out[0];
+                        res.outer[1] = out[1];
+                        res.outer[2] = out[2];
 
-                    std::pair<double,Result> new_pair = std::pair<double,Result> (final_cost, res);
-                    tmp_results_2[tmp_results_2_it] = new_pair;
-                    tmp_results_2_it++;
+                        minimum_cost = final_cost;
+
+                    }
                 }
-
-            }
-
-
-            std::pair<double,Result> new_pair = dummy;
-            double minimum_cost = DBL_MAX;
-
-            for(int k = 0; k < tmp_results_2_it; k++) {
-                std::pair<double,Result> tmp = tmp_results_2[k];
-                if (tmp.first < minimum_cost) {
-                    minimum_cost = tmp.first;
-                    new_pair.first = tmp.first;
-                    new_pair.second = tmp.second;
-                }
-            }
-
-            tmp_results[h] = new_pair;
-
-        }
-
-
-        std::pair<double,Result> new_pair = dummy;
-        double minimum_cost = DBL_MAX;
-
-        for(auto it = tmp_results.begin(); it!=tmp_results.end(); it++) {
-            std::pair<double,Result> tmp = *it;
-            if (tmp.first < minimum_cost) {
-                minimum_cost = tmp.first;
-                new_pair.first = tmp.first;
-                new_pair.second = tmp.second;
             }
         }
 
-        results[w] = new_pair;
-
+        results[w] = std::pair(minimum_cost, res);
     }
 
-
-    struct Result res;
+    int res_indx = 0;
     double minimum_cost = DBL_MAX;
 
-    for(auto it = results.begin(); it!=results.end(); it++) {
-        std::pair<double,Result> tmp = *it;
+    for(int k = 0; k < nx + 1; k++) {
+        std::pair<double,Result> tmp = results[k];
         if (tmp.first < minimum_cost) {
             minimum_cost = tmp.first;
-            res = tmp.second;
+            res_indx = k;
         }
     }
 
-    return res;
+    return results[res_indx].second;
 }
+*/
+
+/*
+typedef double double4_t
+__attribute__ ((vector_size (4 * sizeof(double))));
+
+// Rinnasteisuus ja tehokkaampi suorakulmion koon muuttaminen. Double 4t
+Result segment(int ny, int nx, const float *data) {
+
+    // Lets turn data into an array of pixels. Using double4_t for AVX-2.
+    std::vector<double4_t> data_pxv(nx * ny);
+    double4_t * data_px = &data_pxv[0];
+    #pragma omp parallel for schedule(static,1)
+    for (int j = 0; j < ny; j++) {
+        for (int i = 0; i < nx; i++) {
+            int c_indx = 3 * i + 3 * nx * j;
+            #pragma omp critical
+            for (int n = 0; n < 3; n++) {
+                data_px[i + nx * j][n] = double(data[n + c_indx]);
+            }
+        }
+    }
+
+    // Sum of all pixel color component values stored in vector (R,G,B).
+    double4_t color_sum_v = {0,0,0,0};
+    #pragma omp parallel for schedule(static,1)
+    for (int j = 0; j < ny; j++) {
+        for (int i = 0; i < nx; i++) {
+            #pragma omp critical
+            color_sum_v = color_sum_v + data_px[i + nx * j];
+        }
+    }
+
+    //double csqr_sum = 0;    // Squared sum for all pixels and colors
+    double4_t csqr_sum = {0,0,0,0};
+    #pragma omp parallel for schedule(static,1)
+    for (int j = 0; j < ny; j++) {
+        for (int i = 0; i < nx; i++) {
+            csqr_sum = csqr_sum + data_px[i + nx * j] * data_px[i + nx * j];
+        }
+    }
+
+    auto t1 = std::chrono::high_resolution_clock::now();
+    // Initialize inside regions
+    std::vector<double4_t> initial_inside_numerator_v((nx + 1) * (ny + 1), double4_t {0,0,0,0});
+    double4_t * initial_inside_numerator = &initial_inside_numerator_v[0];
+    #pragma omp parallel for collapse(2)
+    for (int w = 1; w <= nx; w++) {
+        for (int h = 1; h <= ny; h++) {
+            for (int j = 0; j < h; j++) {
+                for (int i = 0; i < w; i++) {
+                    initial_inside_numerator[w + nx * h] = initial_inside_numerator[w + nx * h] + data_px[i + nx *j];
+                }
+            }
+        }
+    }
+    auto t2 = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> t2t1 = t2 - t1;
+    std::cout << t2t1.count() << std::endl;
+
+    // Save results
+    std::pair<double, Result> dummy;
+    dummy.first = DBL_MAX;
+    std::vector<std::pair<double, Result>> results(nx + 1, dummy);
+
+    auto t3 = std::chrono::high_resolution_clock::now();
+    // Create rectangle segments of varying size.
+    #pragma omp parallel for schedule(static,1)
+    for (int w = 1; w <= nx; w++) {
+
+        // Initialize stuff for the threads:
+        // Minimum cost:
+        double minimum_cost = DBL_MAX;
+        struct Result res;
+
+        for (int h = 1; h <= ny; h++) {
+
+            // Denumerators
+            double4_t inside_denumerator = {1.0/double(h * w), 1.0/double(h * w), 1.0/double(h * w), 1.0/double(h * w)};
+            double4_t outside_denumerator = double4_t {1.0/(double(nx * ny)-double(h * w)), 1.0/(double(nx * ny)-double(h * w)), 1.0/(double(nx * ny)-double(h * w)), 1.0/(double(nx * ny)-double(h * w))};
+
+            // Numerators
+            // Inside region
+            double4_t inside_numerator = initial_inside_numerator[w + nx * h];
+            // Outside region
+            double4_t outside_numerator = color_sum_v - inside_numerator;
+
+            // The rectangle is moved. Inside and outside region numerators and sqr sums are recalculated
+            for (int up_left_c_y = 0; h + up_left_c_y <= ny; up_left_c_y++) {
+
+                int low_right_c_y = h + up_left_c_y;   // Lower right corner y pos
+
+                if (up_left_c_y != 0) {
+                    // Go through values that are left outside the new region our that are added to the new region after movement in y direction:
+                    for (int i = 0; i < w; i++) {
+                        int c_indx = i + nx * (up_left_c_y - 1);
+                        int h_diff = nx * h;
+                        outside_numerator = outside_numerator + data_px[c_indx] - data_px[c_indx + h_diff];
+                        inside_numerator = inside_numerator - data_px[c_indx] + data_px[c_indx + h_diff];
+                    }
+                }
+
+                // Save values for movement in x direction
+                std::vector<double4_t> alloc_tmp_outside_numerator_v(nx-w + 1, double4_t {0,0,0,0});
+                double4_t * tmp_outside_numerator_v = &alloc_tmp_outside_numerator_v[0];
+                std::vector<double4_t> alloc_tmp_inside_numerator_v(nx-w + 1, double4_t {0,0,0,0});
+                double4_t * tmp_inside_numerator_v = &alloc_tmp_inside_numerator_v[0];
+                for (int j = up_left_c_y; j < low_right_c_y; j++) {
+                    for (int up_left_c_x = 1; w + up_left_c_x <= nx; up_left_c_x++) {
+                        int c_indx = (up_left_c_x - 1) + nx * j;
+                        tmp_inside_numerator_v[up_left_c_x] = tmp_inside_numerator_v[up_left_c_x] - data_px[c_indx] + data_px[c_indx + w];
+                        tmp_outside_numerator_v[up_left_c_x] = tmp_outside_numerator_v[up_left_c_x] + data_px[c_indx] - data_px[c_indx + w]; 
+                    }
+                }
+
+                double4_t cumulative_in = inside_numerator;
+                double4_t cumulative_out = outside_numerator;
+                for (int up_left_c_x = 0; w + up_left_c_x <= nx; up_left_c_x++) {
+                    cumulative_in = cumulative_in + tmp_inside_numerator_v[up_left_c_x];
+                    cumulative_out = cumulative_out + tmp_outside_numerator_v[up_left_c_x];
+
+                    // Calculating cost:
+                    double4_t inside_sqr_num = cumulative_in * cumulative_in;
+                    double4_t outside_sqr_num = cumulative_out * cumulative_out;
+                    double4_t cost = csqr_sum -(inside_sqr_num*inside_denumerator) -(outside_sqr_num*outside_denumerator);
+
+                    double final_cost = cost[0] + cost[1] + cost[2];
+
+                    if (final_cost < minimum_cost) {
+
+                        res.x0 = up_left_c_x;
+                        res.x1 = up_left_c_x + w;
+                        res.y0 = up_left_c_y;
+                        res.y1 = low_right_c_y;
+                        double4_t in = cumulative_in*inside_denumerator;
+                        double4_t out = cumulative_out*outside_denumerator;
+                        res.inner[0] = in[0];
+                        res.inner[1] = in[1];
+                        res.inner[2] = in[2];
+                        res.outer[0] = out[0];
+                        res.outer[1] = out[1];
+                        res.outer[2] = out[2];
+
+                        minimum_cost = final_cost;
+
+                    }
+                }
+            }
+        }
+
+        results[w] = std::pair(minimum_cost, res);
+    }
+    auto t4 = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> t4t3 = t4 - t3;
+    std::cout << t4t3.count() << std::endl;
+
+    int res_indx = 0;
+    double minimum_cost = DBL_MAX;
+
+    for(int k = 0; k < nx + 1; k++) {
+        std::pair<double,Result> tmp = results[k];
+        if (tmp.first < minimum_cost) {
+            minimum_cost = tmp.first;
+            res_indx = k;
+        }
+    }
+
+    return results[res_indx].second;
+}
+*/
 
 /*
 typedef double double8_t
